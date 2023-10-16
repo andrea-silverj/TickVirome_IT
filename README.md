@@ -1,2 +1,2 @@
-# TickVirome
-Analysis of tick viromes
+# TickVirome_IT
+Analysis of tick viromes from Italy.
