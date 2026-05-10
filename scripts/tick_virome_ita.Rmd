@@ -1,0 +1,467 @@
+---
+title: "Italian tick viromes - Data analysis and figures"
+author: "Andrea Silverj"
+date: '2023-11-14'
+output: html_document
+---
+
+# -----[Data visualization]-----
+
+-|Taxonomic classification|-
+
+Super-kingdom
+Kingdom
+Phylum
+Class
+Order
+Family
+Genus
+Species
+
+Set working directory and load libraries:
+```{r message=FALSE, warning=FALSE}
+setwd("C:/Users/silverja/Projects/tickvirome/Analysis")
+library("ggplot2")
+library("tidyverse")
+library("dplyr")
+library("purrr")
+library("RColorBrewer")
+library("ComplexHeatmap")
+library("DescTools")
+library("circlize")
+library("readxl")
+library("writexl")
+library("stringr")
+library("ggExtra")
+library("cowplot")
+library("ggtree")
+library("ips")
+library("treeio")
+library("tidytree")
+library("ggimage")
+library("ggnewscale")
+library("phytools")
+library("phangorn")
+library("extrafont")
+library("sf")
+library("rnaturalearth")
+library("rnaturalearthdata")
+library("mapproj")
+library("raster")
+library("maptools")
+library("stars")
+library("sf")
+library("rgdal")
+library("raster")
+library("vegan")
+theme_set(theme_bw())
+
+```
+
+Set functions
+```{r}
+# Generic functions
+outersect <- function(x, y) {
+  sort(c(setdiff(x, y),
+         setdiff(y, x)))
+}
+
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+metric_names <- list("shannon"="Shannon","simpson"="Inverse Simpson")
+metric_labeller <- function(variable,value){
+  return(metric_names[value])
+}
+
+# Define functions for alpha diversity calculation
+# Richness
+richness <- function(x){
+  sum(x>0)
+}
+# Shannon index
+shannon <- function(x){
+  rabund <- x[x>0]/sum(x)
+  -sum(rabund * log(rabund))
+}
+# Simpson index
+simpson <- function(x){
+  n <- sum(x)
+  sum(x * (x-1) / (n * (n-1)))
+}
+```
+
+Import data
+```{r}
+# Table with sample stats
+sample_stats <- data.frame(read.csv("tables/Supplementary_Table_XXX__samplingDiffFormatDate.txt", sep="\t"))
+
+# Annotated table with all data for the 99 selected and curated viral contigs
+tv_ann_table_99c <- read_excel("tables/all99_gc_metad_annotated_quality.xlsx")
+
+# Coverage stats at different thresholds for the 99 selected contigs
+tv_cov_table_99c <- data.frame(read.csv("tables/allselected99tickvirome_breadth_depth.txt", sep="\t"))
+
+# NCBI RefSeq viruses
+ncbi_seqs_metadata <- data.frame(read.csv("tables/taxid10239.nbr", sep="\t"))
+
+```
+
+Figure 1a - Map Showing the obtained samples
+```{r}
+# Retrieve world geographic data, transform them in a raster and zoom on the area of interest
+world <- ne_countries(scale = "large", returnclass = "sf")
+world_spatial <- as_Spatial(world)
+italy_raster <- raster(crs = crs(world), vals = 0, resolution = c(0.1, 0.1), ext = extent(c(6.3, 18.7, 36.5, 47.2))) %>% rasterize(world, .)
+
+# Insert borders
+borders = crop(getData("GADM", country="ITA", level=1), extent(italy_raster))
+ita_borders <- st_as_sf(borders)
+
+# Plot the whole area (Italy) - Minimal information
+# Set colour palette - Use Wong's palette (https://www.nature.com/articles/nmeth.1618)
+colfunc <- c('Trento'="#56B4E9", 'Lazio'="#009E73", 'Sicily'="#E69F00")
+
+ggplot(data = world) +
+    geom_sf(data = ita_borders, fill = "white", color="black", size=0.3) +
+    geom_point(data = sample_stats, aes(x = Longitude, y = Latitude, color=Region), size = 2.5) +
+    coord_sf(xlim = c(6.3, 18.7), ylim = c(36.5, 47.2), expand = FALSE)+
+    theme(panel.grid.major = element_line(colour = "transparent"), axis.text.x=element_blank(), axis.ticks.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks.y=element_blank(), axis.title.x=element_blank(), axis.title.y=element_blank(), panel.border = element_blank(), legend.text=element_text(size=10))+
+labs(color="Region")+scale_color_manual(values=colfunc, na.value="#000000")
+
+```
+
+Figure 1b - Heatmap showing RPKM (or RPM) for the identified viral families
+```{r}
+# Get the columns needed for the calculation of RPM and RPKM at family level
+family_level_abundance <- tv_ann_table_99c %>% dplyr::select(sample,tick,region_province,family,tot_reads,mapreads_singlemap,Seq_length) %>%
+group_by(sample, family) %>%
+dplyr::summarise(mapreads_singlemap=sum(mapreads_singlemap), Seq_length=sum(Seq_length), sample=sample, tick=tick, region_province=region_province, tot_reads=tot_reads) %>% distinct()
+
+# Calculate RPKM and RPM at the family level
+tv_rpkm_family_df <- family_level_abundance %>% mutate(RPKM=mapreads_singlemap/((Seq_length/1000)*(tot_reads/1000000))) %>% mutate(RPM=1000000*(mapreads_singlemap/(tot_reads))) %>% mutate(logRPKM=log(RPKM)) %>% mutate(logRPM=log(RPKM))
+
+# RPKM heatmap
+tv_rpkm_tomatrix <- tv_rpkm_family_df %>% dplyr::select(sample, family, logRPKM)
+tv_rpkm_tomatrix_df <- data.frame(tv_rpkm_tomatrix)
+tv_rpkm_tomatrix_wide_df <- spread(tv_rpkm_tomatrix_df, family, logRPKM)
+
+rownames(tv_rpkm_tomatrix_wide_df) <- tv_rpkm_tomatrix_wide_df[,1]
+tv_rpkm_tomatrix_wide_df[,1] <- NULL
+tv_rpkm_tomatrix_wide_df[is.na(tv_rpkm_tomatrix_wide_df)] <- 0
+
+tv_rpkm_matrix <- as.matrix.data.frame(tv_rpkm_tomatrix_wide_df, rownames.force = TRUE)
+
+# Hclust2 type palette
+# c("black", "#0000ff","#00ffff","#ffffff","#ffff00")
+HCcol_funRPKM = colorRamp2(c(0, 2.5, 5, 7.5, 10), c("black", "#0000ff","#00ffff","#ff0000","#ffff00"))
+
+# Red-black palette
+#col_funRPKM = colorRamp2(c(0, 5, 10), c("black", "yellow", "red"))
+#col_funRPM = colorRamp2(c(0, 6, 12), c("black", "yellow", "red"))
+
+Heatmap(t(tv_rpkm_matrix), cluster_columns=FALSE, show_row_dend = FALSE, cluster_row_slices = FALSE, cluster_column_slices = FALSE, name="logRPKM", col=HCcol_funRPKM)
+
+# Add annotation
+
+# Annotation
+# Get the original order of the matrix
+# Column
+original_order <- data.frame(colnames(t(tv_rpkm_matrix)))
+colnames(original_order) <- c('Sample')
+row_id2 <- seq(1, nrow(original_order))
+original_order$row_id2 = row_id2
+
+# Rows
+#original_order_rows <- data.frame(rownames(t(tv_rpkm_matrix)))
+#colnames(original_order_rows) <- c('Sample')
+#roW_id2 <- seq(1, nrow(original_order_rows))
+#original_order_rows$row_id2 = roW_id2
+#row_forder = order(tv_rpkm_family_df$family)  # Get the order of rows alphabetically
+#data_ordered = data[row_order, ]  # Reorder the data according to the alphabetical order of rows
+
+annfamhtmp <- data.frame(sample_stats$Species, sample_stats$Region, sample_stats$sample)
+
+colnames(annfamhtmp) <- c('Species', 'Region', 'Sample')
+row_id <- seq(1, nrow(annfamhtmp))
+annfamhtmp$row_id = row_id
+
+annfamhtmpORD <- data.frame(annfamhtmp[order(annfamhtmp$Species, annfamhtmp$Region, annfamhtmp$Sample),])
+annfamhtmpORDred <- annfamhtmpORD %>% dplyr::select(Species, Region)
+
+colours <- list('Species' = c('Ixodes ricinus' = '#0072b2', 'Dermacentor marginatus' = '#d55e00','Haemaphysalis punctata'='#cc79a7','Rhipicephalus bursa'='#000000','Rhipicephalus sanguineus'='#f0e442'), 'Region' = c('Trento'="#56B4E9", 'Lazio'="#009E73", 'Sicily'="#E69F00"))
+
+colAnn <- HeatmapAnnotation(df = annfamhtmpORDred,
+  which = 'col',
+  col = colours,
+  annotation_width = unit(c(1, 4), 'cm'),
+  gap = unit(1, 'mm'), gp = gpar(col = "black"))
+
+final_order <- merge(original_order,annfamhtmpORD, by="Sample", all.x=TRUE)
+final_orderS <- data.frame(final_order[order(final_order$Species,final_order$Region,final_order$Sample),])
+
+column_order <- final_orderS$row_id2
+ordered_data <- t(tv_rpkm_matrix)[, column_order]
+
+Heatmap((ordered_data), cluster_columns=FALSE, cluster_rows=FALSE, show_row_dend = FALSE, cluster_row_slices = FALSE, cluster_column_slices = FALSE, name="logRPKM", col=HCcol_funRPKM, 
+        top_annotation = colAnn)
+
+```
+
+Figure 1c - Alpha diversity for each sample
+```{r}
+# Get the columns needed for the calculation of RPM and RPKM at species level
+species_level_abundance <- tv_ann_table_99c %>% dplyr::select(sample,tick,region_province,putative_species,tot_reads,mapreads_singlemap,Seq_length) %>%
+group_by(sample, putative_species) %>%
+dplyr::summarise(mapreads_singlemap=sum(mapreads_singlemap), Seq_length=sum(Seq_length), sample=sample, tick=tick, region_province=region_province, tot_reads=tot_reads) %>% distinct()
+
+# Calculate RPKM, RPM and TPM at the species level
+tv_rpkm_species_df <- species_level_abundance %>% mutate(RPKM=mapreads_singlemap/((Seq_length/1000)*(tot_reads/1000000))) %>% mutate(RPM=1000000*(mapreads_singlemap/(tot_reads))) %>% mutate(logRPKM=log(RPKM)) %>% mutate(logRPM=log(RPKM)) %>% mutate(NiLi=mapreads_singlemap/Seq_length)
+
+tv_rpkm_NnLn_species_df <- tv_rpkm_species_df %>% group_by(sample) %>% dplyr::summarise(sample=sample, putative_species=putative_species, region_province=region_province, tick=tick, mapreads_singlemap=mapreads_singlemap, Seq_length=Seq_length, NiLi=NiLi, NnLn=sum(NiLi)) %>% distinct() 
+
+tv_rpkm_TPM_species_df <- tv_rpkm_NnLn_species_df %>% 
+  mutate(TPM=((mapreads_singlemap/Seq_length)*(1000000))/(NnLn))
+
+# Get table to calculate alpha diversity using TPM values
+tv_species_alphaD_df <- tv_rpkm_TPM_species_df %>% dplyr::select(sample, putative_species, TPM, region_province)
+
+# Calculate alpha-diversity
+tv_species_alphaD_plot_df <- tv_species_alphaD_df %>% 
+  group_by(sample) %>%
+  summarise(shannon = shannon(TPM),
+            simpson1 = simpson(TPM),
+            simpson = 1/simpson1) %>%
+  pivot_longer(cols=c(shannon, simpson), names_to = "metric")
+# Add other indices to summarise:
+# sobs = richness(TPM)
+# invsimpson = 1/simpson
+# Add to pivot longer:
+# cols=c(sobs, invsimpson) 
+
+tv_species_alphaD_plot_stats_df <- merge(tv_species_alphaD_plot_df, sample_stats)
+
+# Plot alpha diversity measures by species
+colfunc_species=c('Dermacentor marginatus' = '#d55e00','Haemaphysalis punctata'='#cc79a7','Ixodes ricinus' = '#0072b2','Rhipicephalus bursa'='#000000','Rhipicephalus sanguineus'='#f0e442')
+colfunc_ticks=c('D. marginatus' = '#d55e00','H. punctata'='#cc79a7','I. ricinus' = '#0072b2','R. bursa'='#000000','R. sanguineus'='#f0e442')
+
+alphaD_species_plot <- tv_species_alphaD_plot_stats_df %>% 
+  ggplot(aes(x = reorder_within(Tick, value, metric, median), y = value, color=Tick, fill=Tick)) +
+  geom_boxplot(alpha=0.2)+
+  geom_violin(alpha=0.2,trim=FALSE)+
+  geom_point(alpha=1,size=1.5)+
+  scale_x_reordered()+
+  theme(panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1.02, face = "italic"), axis.title.x=element_blank())+
+  facet_wrap(vars(metric), scales = "free", labeller = metric_labeller)+
+  scale_color_manual(values=colfunc_ticks, na.value="#000000")+
+  scale_fill_manual(values=colfunc_ticks, na.value="#000000")
+
+# Statistics
+tv_species_alphaD_shannon <- tv_species_alphaD_plot_stats_df %>% filter(metric=="shannon")
+tv_species_alphaD_simpson <- tv_species_alphaD_plot_stats_df %>% filter(metric=="simpson")
+
+kruskal.test(value ~ Species, data = tv_species_alphaD_shannon)
+kruskal.test(value ~ Species, data = tv_species_alphaD_simpson)
+
+pairwise.wilcox.test(tv_species_alphaD_shannon$value, tv_species_alphaD_shannon$Tick, p.adjust.method = "bonferroni")
+pairwise.wilcox.test(tv_species_alphaD_simpson$value, tv_species_alphaD_shannon$Tick, p.adjust.method = "bonferroni")
+  
+# Plot alpha diversity measures by region
+colfunc_regions <- c('Trento'="#56B4E9", 'Lazio'="#009E73", 'Sicily'="#E69F00")
+alphaD_regions_plot <- tv_species_alphaD_plot_stats_df %>% 
+  ggplot(aes(x = reorder_within(Region, value, metric, median), y = value, color=Region, fill=Region)) + 
+  geom_boxplot(alpha=0.2)+
+  geom_violin(alpha=0.2,trim=FALSE)+
+  geom_point(alpha=1,size=1.5)+
+  scale_x_reordered()+
+  facet_wrap(vars(metric), scales = "free", labeller = metric_labeller)+
+  theme(panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.title.x=element_blank())+
+  scale_color_manual(values=colfunc_regions, na.value="#000000")+
+  scale_fill_manual(values=colfunc_regions, na.value="#000000")
+
+# Statistics
+tv_species_alphaD_shannon <- tv_species_alphaD_plot_stats_df %>% filter(metric=="shannon")
+tv_species_alphaD_simpson <- tv_species_alphaD_plot_stats_df %>% filter(metric=="simpson")
+
+kruskal.test(value ~ Region, data = tv_species_alphaD_shannon)
+kruskal.test(value ~ Region, data = tv_species_alphaD_simpson)
+
+pairwise.wilcox.test(tv_species_alphaD_shannon$value, tv_species_alphaD_shannon$Region, p.adjust.method = "bonferroni")
+pairwise.wilcox.test(tv_species_alphaD_simpson$value, tv_species_alphaD_shannon$Region, p.adjust.method = "bonferroni")
+
+plot_grid(alphaD_species_plot, alphaD_regions_plot, labels = "AUTO", ncol = 1, align=c("hv"))
+```
+
+Supplementary Figure 1 - Heatmap showing RPKM (or RPM) for the identified viral species
+```{r}
+# Get the columns needed for the calculation of RPM and RPKM at family level
+species_level_abundance <- tv_ann_table_99c %>% dplyr::select(sample,tick,region_province,putative_species,tot_reads,mapreads_singlemap,Seq_length) %>%
+group_by(sample, putative_species) %>%
+dplyr::summarise(mapreads_singlemap=sum(mapreads_singlemap), Seq_length=sum(Seq_length), sample=sample, tick=tick, region_province=region_province, tot_reads=tot_reads) %>% distinct()
+
+# Calculate RPKM and RPM at the family level
+tv_rpkm_species_df <- species_level_abundance %>% mutate(RPKM=mapreads_singlemap/((Seq_length/1000)*(tot_reads/1000000))) %>% mutate(RPM=1000000*(mapreads_singlemap/(tot_reads))) %>% mutate(logRPKM=log(RPKM)) %>% mutate(logRPM=log(RPKM))
+
+# RPKM heatmap
+tv_rpkm_tomatrix <- tv_rpkm_species_df %>% dplyr::select(sample, putative_species, logRPKM)
+tv_rpkm_tomatrix_df <- data.frame(tv_rpkm_tomatrix)
+tv_rpkm_tomatrix_wide_df <- spread(tv_rpkm_tomatrix_df, putative_species, logRPKM)
+
+rownames(tv_rpkm_tomatrix_wide_df) <- tv_rpkm_tomatrix_wide_df[,1]
+tv_rpkm_tomatrix_wide_df[,1] <- NULL
+tv_rpkm_tomatrix_wide_df[is.na(tv_rpkm_tomatrix_wide_df)] <- 0
+
+tv_rpkm_matrix <- as.matrix.data.frame(tv_rpkm_tomatrix_wide_df, rownames.force = TRUE)
+
+# Hclust2 type palette
+# c("black", "#0000ff","#00ffff","#ffffff","#ffff00")
+HCcol_funRPKM = colorRamp2(c(0, 2.5, 5, 7.5, 10), c("black", "#0000ff","#00ffff","#ff0000","#ffff00"))
+
+# Red-black palette
+#col_funRPKM = colorRamp2(c(0, 5, 10), c("black", "yellow", "red"))
+#col_funRPM = colorRamp2(c(0, 6, 12), c("black", "yellow", "red"))
+
+Heatmap(t(tv_rpkm_matrix), cluster_columns=FALSE, show_row_dend = FALSE, cluster_row_slices = FALSE, cluster_column_slices = FALSE, name="logRPKM", col=HCcol_funRPKM)
+
+# Add annotation
+
+# Annotation
+# Get the original order of the matrix
+# Column
+original_order <- data.frame(colnames(t(tv_rpkm_matrix)))
+colnames(original_order) <- c('Sample')
+row_id2 <- seq(1, nrow(original_order))
+original_order$row_id2 = row_id2
+
+# Rows
+#original_order_rows <- data.frame(rownames(t(tv_rpkm_matrix)))
+#colnames(original_order_rows) <- c('Sample')
+#roW_id2 <- seq(1, nrow(original_order_rows))
+#original_order_rows$row_id2 = roW_id2
+#row_forder = order(tv_rpkm_family_df$family)  # Get the order of rows alphabetically
+#data_ordered = data[row_order, ]  # Reorder the data according to the alphabetical order of rows
+
+annfamhtmp <- data.frame(sample_stats$Species, sample_stats$Region, sample_stats$sample)
+
+colnames(annfamhtmp) <- c('Species', 'Region', 'Sample')
+row_id <- seq(1, nrow(annfamhtmp))
+annfamhtmp$row_id = row_id
+
+annfamhtmpORD <- data.frame(annfamhtmp[order(annfamhtmp$Species, annfamhtmp$Region, annfamhtmp$Sample),])
+annfamhtmpORDred <- annfamhtmpORD %>% dplyr::select(Species, Region)
+
+colours <- list('Species' = c('Ixodes ricinus' = '#0072b2', 'Dermacentor marginatus' = '#d55e00','Haemaphysalis punctata'='#cc79a7','Rhipicephalus bursa'='#000000','Rhipicephalus sanguineus'='#f0e442'), 'Region' = c('Trento'="#56B4E9", 'Lazio'="#009E73", 'Sicily'="#E69F00"))
+
+colAnn <- HeatmapAnnotation(df = annfamhtmpORDred,
+  which = 'col',
+  col = colours,
+  annotation_width = unit(c(1, 4), 'cm'),
+  gap = unit(1, 'mm'), gp = gpar(col = "black"))
+
+final_order <- merge(original_order,annfamhtmpORD, by="Sample", all.x=TRUE)
+final_orderS <- data.frame(final_order[order(final_order$Species,final_order$Region,final_order$Sample),])
+
+column_order <- final_orderS$row_id2
+ordered_data <- t(tv_rpkm_matrix)[, column_order]
+
+Heatmap((ordered_data), cluster_columns=FALSE, cluster_rows=FALSE, show_row_dend = FALSE, cluster_row_slices = FALSE, cluster_column_slices = FALSE, name="logRPKM", col=HCcol_funRPKM, 
+        top_annotation = colAnn)
+
+```
+
+Supplementary Figure 2 - Breadth and depth of coverage for different quality thresholds
+```{r}
+plotSupp1a_mapping_quality_stats <- ggplot(tv_cov_table_99c, aes(x=breadth, y=log(depthavg), color=breadth,fill= breadth)) +
+  geom_point(alpha=0.8,size=1.5) + ylim(-0.1,10)+ xlim(0,1) + #position=position_jitter(width=0.15), 
+  geom_boxplot(fill=NA, outlier.size=NA,lwd=1) + guides(fill=FALSE) +
+  ylab("Log average coverage depth") + 
+  xlab("Breadth of coverage") + 
+  geom_violin(alpha=0.3,trim=FALSE) + 
+  facet_grid(. ~ mincov, scales = "free_x", space="free_x") +
+  facet_grid(~factor(mincov, levels=c('nofilter', 'mincov3', 'mincov5', 'mincov10')))+
+  theme_light() +
+  theme(legend.position="none") + 
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank())
+
+plotSupp1b_mapping_quality_stats <- ggplot(tv_cov_table_99c, aes(x=breadth, y=log(depthmedian), color=breadth,fill= breadth)) +
+  geom_point(alpha=0.8,size=1.5) + ylim(-0.1,10)+ xlim(0,1) + #position=position_jitter(width=0.15), 
+  geom_boxplot(fill=NA, outlier.size=NA,lwd=1) + guides(fill=FALSE) +
+  ylab("Log median coverage depth") + 
+  xlab("Breadth of coverage") + 
+  geom_violin(alpha=0.3,trim=FALSE) + 
+  facet_grid(. ~ mincov, scales = "free_x", space="free_x") +
+  facet_grid(~factor(mincov, levels=c('nofilter', 'mincov3', 'mincov5', 'mincov10')))+
+  theme_light() +
+  theme(legend.position="none") + 
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank())
+
+plot_grid(plotSupp1a_mapping_quality_stats, plotSupp1b_mapping_quality_stats, labels = "AUTO", ncol = 1)
+
+```
+
+Supplementary Figure 3 - Viral phylogeny at the family level
+```{r}
+ncbi_seqs_metadata2 <- ncbi_seqs_metadata %>% separate(SelectedLineage, into=c("family","genus","species"), sep="[,]", remove=FALSE)
+
+
+botourmiaviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Botourmiaviridae")
+bromoviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Bromoviridae")
+chuviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Chuviridae")
+circoviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Circoviridae")
+flaviviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Flaviviridae")
+luteoviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Luteoviridae")
+nairoviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Nairoviridae")
+orthomyxoviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Orthomyxoviridae")
+partitiviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Partitiviridae")
+peribunyaviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Peribunyaviridae")
+phenuiviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Phenuiviridae")
+rhabdoviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Rhabdoviridae")
+totiviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Totiviridae")
+
+virgaviridae_seqs <- ncbi_seqs_metadata2 %>% filter(family=="Virgaviridae")
+
+putative_new_vspecies <- c("Bole Tick Mediterranean Virus","Circoviridae sp.","Inglesidevirus tarquiniae", "Lonestarticktotivirus italiae", "Mononegavirus tridentinum", "Tickbunyavirus siciliae", "Totiviridae sp.", "Totivirus genuardii", "Zambezi tick like italian virus")
+
+putative_new_vspecies_family <- c("Chuviridae","Circoviridae","Virgaviridae","Totiviridae","Rhabdoviridae","Peribunyaviridae","Totiviridae","Totiviridae","Orthomyxoviridae")
+
+
+## Too short to say something (then discarded from the list of new viruses) ##
+
+# Circoviridae sp.: probably all contaminants
+# RB-25T: only capsid protein
+
+# Lonestar_tick_totivirus__RS-M1__pnv
+
+# All Mononegavirus tridentinum contigs
+
+# Xinjiang tick totivirus 2
+# Xinjiang_tick_totivirus_2__DM-F3__pnv
+# Xinjiang_tick_totivirus_2__DM-1T__kv
+# Xinjiang_tick_totivirus_2__DM-26I__pnv
+# Xinjiang_tick_totivirus_2__DM-F3__kv
+# Xinjiang_tick_totivirus_2__RB-41T__pnv
+# Xinjiang_tick_totivirus_2__DM-27I__pnv
+
+# All Zambezi tick like italian virus
+
+
+# Real new viruses
+# Bole Tick Mediterranean Virus
+# Inglesidevirus tarquiniae
+# Lonestarticktotivirus italiae
+# Tickbunyavirus siciliae
+# Totivirus genuardii
+
+
+```
