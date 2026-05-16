@@ -1,7 +1,7 @@
 # TickVirome_IT
 Analysis of tick viromes from Italy.
 
-<img src="./plots/Figure1.png" width=800>
+
 
 Metatranscriptome-assembled viral contigs (_n_ = 99) and annotations from ticks sampled across multiple locations in Italy are available on Zenodo:
 
